@@ -1,0 +1,112 @@
+Half-Precision Modification Description for Kernel_2_viscoelastic_impl.cu
+
+I. Primary Scope of Modifications
+
+The modifications are made to the file src/gpu/Kernel_2_viscoelastic_impl.cu. The changes mainly target local intermediate variables used during the internal force calculation process in the spectral-element method, including local matrix-vector multiplications, spatial derivative computations, strain calculations, and stress computations. The half-precision modifications referred to in this document mean the introduction of BF16 mixed-precision computation in the local calculation stages. This is achieved by using CUDA BF16 related types and functions such as __nv_bfloat16, __float2bfloat16, __bfloat162float, __hfma, __hmul, and __hadd, converting selected local floating-point operations from the original realw single-precision format to BF16 format.
+
+II. Parameters and Scaling Factors
+
+In half-precision computation, scaling factors can be set based on the numerical ranges of different physical quantities in the model. Examples include:
+
+define SCALE_FACTORT 9007199254740992.0f
+define INV_SCALET (1.0f / 9007199254740992.0f)
+define SCALE_FACTORF 2.0f
+define INV_SCALEF (1.0f / 2.0f)
+
+SCALE_FACTORT and SCALE_FACTORF are used to scale selected intermediate quantities up or down before they enter half-precision computation, while INV_SCALET and INV_SCALEF are the corresponding inverse scaling factors used to restore results to their original magnitude after computation.
+
+III. Conversion of Local Intermediate Variables in Spectral-Element Derivative Computations to BF16 Type
+
+Local accumulation and output variables in these functions are changed to the __nv_bfloat16 type. Examples include:
+
+__nv_bfloat16 reg_sumx
+__nv_bfloat16 reg_sumy
+__nv_bfloat16 reg_sumz
+
+During the loop computation, displacement components and hprime coefficients from shared memory are converted to BF16 type using __float2bfloat16, and multiply-accumulate operations are performed using __hfma:
+
+reg_sumx = __hfma(h_valx, h_fac, reg_sumx)
+
+This converts a portion of the local matrix-vector multiplication in the spectral-element method from single-precision floating-point operations to half-precision register operations, reducing register pressure and floating-point computational overhead.
+
+IV. BF16 Conversion for Weighted Derivative Matrix Multiplications
+
+In addition to the ordinary hprime derivative calculations, similar modifications are applied to weighted derivative matrix multiplication functions such as sum_hprimewgll_xi, sum_hprimewgll_eta, and sum_hprimewgll_gamma. These functions are used for weighted derivative terms in subsequent internal force integration. After modification, local variables such as tempxl, tempyl, and tempzl in the function inputs and outputs are changed to the __nv_bfloat16 type. Inside the loop, single-precision data from sh_tempx, sh_tempy, sh_tempz, and sh_hprimewgll are temporarily converted to BF16, and accumulation is completed through half-precision multiply-add operations.
+
+V. Modifications to Spatial Derivative Computation in get_spatial_derivatives
+
+The get_spatial_derivatives function computes physical-space displacement gradients using local spectral-element derivatives and coordinate transformation coefficients. Local derivative variables in this function are changed from realw to __nv_bfloat16 type, including:
+
+tempx1l, tempy1l, tempz1l
+tempx2l, tempy2l, tempz2l
+tempx3l, tempy3l, tempz3l
+
+And the output displacement gradient components:
+
+duxdxl, duxdyl, duxdzl
+duydxl, duydyl, duydzl
+duzdxl, duzdyl, duzdzl
+
+For irregular elements, the program first reads coordinate transformation coefficients such as xix, xiy, xiz, etax, etay, etaz, gammax, gammay, and gammaz, then converts them to BF16 type, and computes physical-space displacement gradients through half-precision multiply-add operations. For regular elements, the program converts xix_regular to BF16 type and directly multiplies it with the local derivative terms. This allows the main local derivative calculations to be performed in half-precision while preserving the original computation logic for both regular and irregular elements.
+
+VI. Modifications to Strain Computation in Viscoelastic Internal Force Calculation
+
+In the viscoelastic internal force computation kernel, intermediate strain-related quantities derived from displacement gradient combinations are changed to BF16 type computations, including:
+
+duxdxl_plus_duydyl
+duxdxl_plus_duzdzl
+duydyl_plus_duzdzl
+duxdyl_plus_duydxl
+duzdxl_plus_duxdzl
+duzdyl_plus_duydzl
+
+Meanwhile, deviatoric strain and trace terms are also computed using BF16 intermediate quantities:
+
+h_epsilondev_trace_loc
+h_epsilondev_xx_loc
+h_epsilondev_yy_loc
+h_epsilondev_xy_loc
+h_epsilondev_xz_loc
+h_epsilondev_yz_loc
+
+After computation, these are converted back to the realw type using __bfloat162float and written into the original variables such as epsilondev_xx_loc, epsilondev_yy_loc, and epsilondev_xy_loc. The purpose of this treatment is to allow the strain computation process to leverage half-precision operations to reduce local computational overhead while maintaining the original program interfaces for subsequent storage, attenuation memory variable updates, and other operations using the realw type.
+
+VII. Modifications to Local Variable Types in Isotropic Stress Computation
+
+In the isotropic medium stress computation section, local variables for elastic parameters such as kappal, mul, lambdalplus2mul, and lambdal are changed to the __nv_bfloat16 type. The original computation logic is:
+
+lambdalplus2mul = kappal + 4.0/3.0 * mul
+lambdal = lambdalplus2mul - 2.0 * mul
+
+After modification, kappa_full and mu_full are first converted to BF16 type, and half-precision stress computations are completed using __hadd, __hmul, and __hfma for:
+
+h_sigma_xx
+h_sigma_yy
+h_sigma_zz
+h_sigma_xy
+h_sigma_xz
+h_sigma_yz
+
+Finally, the BF16 stress components are converted back to the realw type and passed to subsequent attenuation stress correction, gravity term calculations, and internal force integration processes. This modification does not change the physical expressions of the original stress tensor; it only converts a portion of the floating-point operations in the local stress computation to BF16 mixed-precision computation.
+
+GPU-Direct Communication Modification Description
+
+I. Scope of Modifications
+
+This section primarily modifies the following three files:
+
+1. src/gpu/assemble_MPI_vector_cuda.cu
+2. src/specfem3D/assemble_MPI_vector.f90
+3. src/shared/parallel.f90
+
+II. Design Rationale
+
+These modifications introduce CUDA-aware MPI on the MPI send side. Boundary acceleration data remain packed on the GPU into d_send_accel_buffer or d_b_send_accel_buffer. The Fortran side retrieves the device pointer through an interface and calls MPI_Isend for transmission.
+
+III. Key Changes
+
+1. In assemble_MPI_vector_cuda.cu, transfer_boundary_from_device_a retains GPU-side boundary packing, but in send-only mode, d_send_accel_buffer is no longer copied to the host send buffer. transfer_boun_accel_from_device also retains GPU packing for the adjoint b_accel and no longer forces copying to the host send buffer in send-only mode. A new interface get_boundary_accel_device_ptr_by_interface is added to return the device pointer for d_send_accel_buffer or d_b_send_accel_buffer per interface. In sync_copy_from_device, send-only mode only synchronizes the compute stream and no longer copies to the host send buffer.
+
+2. In assemble_MPI_vector.f90, assemble_MPI_vector_send_cuda adds a FORWARD_OR_ADJOINT parameter. On the send side, get_boundary_accel_device_ptr_by_interface is called to obtain the device pointer. MPI_Isend is replaced with isend_cr_device. MPI_Irecv continues using the original host receive buffer, preserving the receive and assembly path.
+
+3. In parallel.f90, isend_cr_device is added to pass the device address returned from the CUDA side to MPI_Isend.
