@@ -1,0 +1,13 @@
+./configure FC=gfortran CC=gcc MPIFC=mpif90 --with-mpi --with-cuda CUDA_LIB=/usr/local/cuda/lib64
+
+FC=gfortran CC=gcc MPIFC=mpif90 CPPFLAGS="-I/usr/include/x86_64-linux-gnu/mpich" LDFLAGS="-L/usr/lib/x86_64-linux-gnu -lmpi -lmpifort" ./configure --with-mpi --with-cuda CUDA_LIB=/usr/local/cuda/lib64 --enable-vectorization
+
+
+MPI_INCLUDES = -I/usr/include/x86_64-linux-gnu/mpich
+
+# ... Other existing GENCODE configurations ...
+
+GENCODE_86 = -gencode=arch=compute_86,code=\"sm_86,compute_86\"
+GENCODE_89 = -gencode=arch=compute_89,code=\"sm_89,compute_89\"
+
+
